@@ -1,0 +1,9 @@
+bin/
+*.o
+.vscode/
+.DS_Store
+build*/
+*.ncu*
+
+__pycache__
+log/

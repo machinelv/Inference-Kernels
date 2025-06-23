@@ -1,0 +1,15 @@
+[submodule "ref/CUDA-GEMM-Optimization"]
+	path = ref/CUDA-GEMM-Optimization
+	url = https://github.com/leimao/CUDA-GEMM-Optimization.git
+[submodule "ref/How_to_optimize_in_GPU"]
+	path = ref/How_to_optimize_in_GPU
+	url = https://github.com/Liu-xiandong/How_to_optimize_in_GPU.git
+[submodule "ref/DeepGEMM"]
+	path = ref/DeepGEMM
+	url = https://github.com/deepseek-ai/DeepGEMM.git
+[submodule "ref/RadeonFlow_Kernels"]
+	path = ref/RadeonFlow_Kernels
+	url = https://github.com/RadeonFlow/RadeonFlow_Kernels.git
+[submodule "GEMM/QGEMM"]
+	path = GEMM/QGEMM
+	url = https://github.com/machinelv/QGEMM.git
