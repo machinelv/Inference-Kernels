@@ -13,3 +13,18 @@
 [submodule "GEMM/QGEMM"]
 	path = GEMM/QGEMM
 	url = https://github.com/machinelv/QGEMM.git
+[submodule "Attention"]
+	path = Attention
+	url = https://github.com/machinelv/Attention.git
+[submodule "MoE"]
+	path = MoE
+	url = https://github.com/machinelv/MoE.git
+[submodule "ref/cutlass"]
+	path = ref/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
+[submodule "ref/composable_kernel"]
+	path = ref/composable_kernel
+	url = https://github.com/ROCm/composable_kernel.git
+[submodule "ref/MixedPrecisionGEMM"]
+	path = ref/MixedPrecisionGEMM
+	url = https://github.com/HJzhang-sjtu/MixedPrecisionGEMM
