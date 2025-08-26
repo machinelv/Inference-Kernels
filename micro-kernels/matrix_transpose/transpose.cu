@@ -1,16 +1,27 @@
 #include <iostream>
 #include <cstdlib>
 
-#include "gpu_lib.h"
-#include "gpu_type.h"
-#include "matrix_transpose.h"
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
+#include <cuda_bf16.h>
 
+#define LDMATRIX_BF16_X4(R0, R1, R2, R3, addr)                                             \
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" \
+                 : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                             \
+                 : "r"(addr))
 
+#define LDMATRIX_BF16_TRANSPOSE_X4(R0, R1, R2, R3, addr)                                             \
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n" \
+                 : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                             \
+                 : "r"(addr))
+
+#define WARP_SIZE 32
 #define VECTYPE float4
-
+#define PADDING 0
 
 template<size_t BLOCK_TILE_SIZE_M, size_t BLOCK_TILE_SIZE_N, size_t WARP_TILE_SIZE_M, size_t WARP_TILE_SIZE_N, size_t MAT_TILE_SIZE_M, size_t MAT_TILE_SIZE_N, size_t THREAD_NUM>
-__global__ void matrix_tranpose_v1(const __nv_bfloat16* idata, __nv_bfloat16* odata, int M, int N) {
+__global__ void matrix_transpose_kernel_v1(const __nv_bfloat16* idata, __nv_bfloat16* odata, int M, int N) {
     // Get index
     size_t block_id_m = blockIdx.y;
     size_t block_id_n = blockIdx.x;
@@ -22,7 +33,7 @@ __global__ void matrix_tranpose_v1(const __nv_bfloat16* idata, __nv_bfloat16* od
     size_t warp_id_n = warp_id % (BLOCK_TILE_SIZE_N / WARP_TILE_SIZE_N);
 
     // load matrix from global memory to shared memory using vector fetching
-    __shared__ __nv_bfloat16 block_tile[BLOCK_TILE_SIZE_M][BLOCK_TILE_SIZE_N];
+    __shared__ __nv_bfloat16 block_tile[BLOCK_TILE_SIZE_M][BLOCK_TILE_SIZE_N + PADDING];
 
     static_assert(sizeof(VECTYPE) % sizeof(__nv_bfloat16) == 0, "VECTYPE must be a multiple of T size");
     constexpr size_t NUM_VECTOR_UNITS{sizeof(VECTYPE) / sizeof(__nv_bfloat16)};
@@ -61,15 +72,15 @@ __global__ void matrix_tranpose_v1(const __nv_bfloat16* idata, __nv_bfloat16* od
 
     uint32_t warp_tile[MAT_TILE_PER_WARP_N][MAT_TILE_PER_WARP_M][4];
 
-    const size_t smem_n_offset = lane_id / 16 * 8;
-    const size_t smem_m_offset = lane_id % 16;
+    size_t smem_n_offset = lane_id / 16 * 8;
+    size_t smem_m_offset = lane_id % 16;
 
     const size_t warp_tile_start_m = warp_id_m * WARP_TILE_SIZE_M;
     const size_t warp_tile_start_n = warp_id_n * WARP_TILE_SIZE_N;
 
-    #pragma unroll (MAT_TILE_PER_WARP_M)
+    #pragma unroll(MAT_TILE_PER_WARP_M)
     for (size_t warp_tile_m{0}; warp_tile_m < MAT_TILE_PER_WARP_M; ++warp_tile_m) {
-        #pragma unroll (MAT_TILE_PER_WARP_N)
+        #pragma unroll(MAT_TILE_PER_WARP_N)
         for (size_t warp_tile_n{0}; warp_tile_n < MAT_TILE_PER_WARP_N; ++warp_tile_n) {
             size_t src_m = warp_tile_start_m + warp_tile_m * MAT_TILE_SIZE_M;
             size_t src_n = warp_tile_start_n + warp_tile_n * MAT_TILE_SIZE_N;
@@ -78,10 +89,12 @@ __global__ void matrix_tranpose_v1(const __nv_bfloat16* idata, __nv_bfloat16* od
         }
     }
 
+    smem_m_offset = lane_id % 4 * 2;
+    smem_n_offset = lane_id / 4;
     // store the transposed matrix from register to shared memory
-    #pragma unroll (MAT_TILE_PER_WARP_N)
+    #pragma unroll(MAT_TILE_PER_WARP_N)
         for (size_t warp_tile_n{0}; warp_tile_n < MAT_TILE_PER_WARP_N; ++warp_tile_n) {
-        #pragma unroll (MAT_TILE_PER_WARP_M)
+        #pragma unroll(MAT_TILE_PER_WARP_M)
         for (size_t warp_tile_m{0}; warp_tile_m < MAT_TILE_PER_WARP_M; ++warp_tile_m) {
             size_t src_m = warp_tile_start_m + warp_tile_m * MAT_TILE_SIZE_M;
             size_t src_n = warp_tile_start_n + warp_tile_n * MAT_TILE_SIZE_N;
@@ -114,14 +127,71 @@ __global__ void matrix_tranpose_v1(const __nv_bfloat16* idata, __nv_bfloat16* od
     }
 }
 
+
+template<size_t BLOCK_TILE_SIZE_M, size_t BLOCK_TILE_SIZE_N, size_t THREAD_NUM>
+__global__ void matrix_transpose_kernel_v2(const __nv_bfloat16* idata, __nv_bfloat16* odata, int M, int N)
+{
+    // Get index
+    size_t block_id_m = blockIdx.y;
+    size_t block_id_n = blockIdx.x;
+    size_t thread_id = threadIdx.x + threadIdx.y * blockDim.x;
+
+    // load matrix from global memory to shared memory using vector fetching
+    __shared__ __nv_bfloat16 block_tile[BLOCK_TILE_SIZE_M][BLOCK_TILE_SIZE_N];
+
+    static_assert(sizeof(VECTYPE) % sizeof(__nv_bfloat16) == 0, "VECTYPE must be a multiple of T size");
+    constexpr size_t NUM_VECTOR_UNITS{sizeof(VECTYPE) / sizeof(__nv_bfloat16)};
+    constexpr size_t VECTORIZED_BLOCK_TILE_SIZE_N{BLOCK_TILE_SIZE_N / NUM_VECTOR_UNITS};
+    constexpr size_t VECTORIZED_BLOCK_TILE_SIZE_M{BLOCK_TILE_SIZE_M / NUM_VECTOR_UNITS};
+
+    static_assert(BLOCK_TILE_SIZE_M % NUM_VECTOR_UNITS == 0);
+    static_assert(BLOCK_TILE_SIZE_N % NUM_VECTOR_UNITS == 0);
+
+    union VectorAccess {
+        VECTYPE vec;
+        __nv_bfloat16 elements[NUM_VECTOR_UNITS];
+    };
+
+    size_t block_tile_start_m = block_id_m * BLOCK_TILE_SIZE_M;
+    size_t block_tile_start_n = block_id_n * BLOCK_TILE_SIZE_N;
+
+    for (size_t load_idx{0U}; load_idx < (BLOCK_TILE_SIZE_M * VECTORIZED_BLOCK_TILE_SIZE_N + THREAD_NUM - 1) / THREAD_NUM; load_idx ++) {
+        size_t block_tile_M_id{(thread_id + load_idx * THREAD_NUM) / VECTORIZED_BLOCK_TILE_SIZE_N};
+        size_t block_tile_N_id{(thread_id + load_idx * THREAD_NUM) % VECTORIZED_BLOCK_TILE_SIZE_N * NUM_VECTOR_UNITS};
+
+        size_t M_id{block_tile_M_id + block_tile_start_m};
+        size_t N_id{block_tile_N_id + block_tile_start_n};
+
+        VectorAccess row_vector_vals;
+
+        row_vector_vals.vec = *reinterpret_cast<VECTYPE const*>(&idata[M_id * N + N_id]);
+        *reinterpret_cast<VECTYPE*>(&block_tile[block_tile_M_id][block_tile_N_id]) = row_vector_vals.vec;
+    }
+    __syncthreads();
+
+    for (size_t load_idx{0U}; load_idx < (BLOCK_TILE_SIZE_M * VECTORIZED_BLOCK_TILE_SIZE_N + THREAD_NUM - 1) / THREAD_NUM; load_idx ++) {
+        size_t block_tile_M_id{(thread_id + load_idx * THREAD_NUM) / VECTORIZED_BLOCK_TILE_SIZE_N};
+        size_t block_tile_N_id{(thread_id + load_idx * THREAD_NUM) % VECTORIZED_BLOCK_TILE_SIZE_N * NUM_VECTOR_UNITS};
+
+        size_t M_id{block_tile_M_id + block_tile_start_m};
+        size_t N_id{block_tile_N_id + block_tile_start_n};
+
+        for (size_t i = 0; i < 8; i++) {
+            odata[M_id + (N_id + i) * M] = block_tile[block_tile_M_id][block_tile_N_id + i];
+        }
+    }
+
+}
+
+
 template <typename T>
 void matrix_transpose_v1(const T* idata, T* odata, int M, int N) {
     
     if constexpr (sizeof(T) == 2) {
         constexpr size_t BLOCK_TILE_SIZE_M = 128;
         constexpr size_t BLOCK_TILE_SIZE_N = 128;
-        constexpr size_t WARP_TILE_SIZE_M = 64;
-        constexpr size_t WARP_TILE_SIZE_N = 64;
+        constexpr size_t WARP_TILE_SIZE_M = 32;
+        constexpr size_t WARP_TILE_SIZE_N = 32;
         constexpr size_t MAT_TILE_SIZE_M = 16;
         constexpr size_t MAT_TILE_SIZE_N = 16;
         constexpr size_t THREAD_NUM = (BLOCK_TILE_SIZE_M / WARP_TILE_SIZE_M) * (BLOCK_TILE_SIZE_N / WARP_TILE_SIZE_N) * WARP_SIZE;
@@ -129,13 +199,30 @@ void matrix_transpose_v1(const T* idata, T* odata, int M, int N) {
         dim3 blockDim(THREAD_NUM, 1, 1);
         dim3 gridDim((N + BLOCK_TILE_SIZE_N - 1) / BLOCK_TILE_SIZE_N, (M + BLOCK_TILE_SIZE_M - 1) / BLOCK_TILE_SIZE_M, 1);
 
-        matrix_tranpose_v1<BLOCK_TILE_SIZE_M, BLOCK_TILE_SIZE_N, WARP_TILE_SIZE_M, WARP_TILE_SIZE_N, MAT_TILE_SIZE_M, MAT_TILE_SIZE_N, THREAD_NUM><<<gridDim, blockDim>>>((__nv_bfloat16*)idata, (__nv_bfloat16*)odata, M, N);
+        matrix_transpose_kernel_v1<BLOCK_TILE_SIZE_M, BLOCK_TILE_SIZE_N, WARP_TILE_SIZE_M, WARP_TILE_SIZE_N, MAT_TILE_SIZE_M, MAT_TILE_SIZE_N, THREAD_NUM><<<gridDim, blockDim>>>((__nv_bfloat16*)idata, (__nv_bfloat16*)odata, M, N);
     } else {
         std::cerr << "Only support bf16 data type now." << std::endl;
         return;
     }
 }
 
+
+template <typename T>
+void matrix_transpose_v2(const T* idata, T* odata, int M, int N) {
+    if constexpr (sizeof(T) == 2) {
+        constexpr size_t BLOCK_TILE_SIZE_M = 32;
+        constexpr size_t BLOCK_TILE_SIZE_N = 32;
+        constexpr size_t THREAD_NUM = 256;
+        
+        dim3 blockDim(THREAD_NUM, 1, 1);
+        dim3 gridDim((N + BLOCK_TILE_SIZE_N - 1) / BLOCK_TILE_SIZE_N, (M + BLOCK_TILE_SIZE_M - 1) / BLOCK_TILE_SIZE_M, 1);
+
+        matrix_transpose_kernel_v2<BLOCK_TILE_SIZE_M, BLOCK_TILE_SIZE_N, THREAD_NUM><<<gridDim, blockDim>>>((__nv_bfloat16*)idata, (__nv_bfloat16*)odata, M, N);
+    } else {
+        std::cerr << "Only support bf16 data type now." << std::endl;
+        return;
+    }
+}
 
 #ifdef LOCAL_TEST
 #include <iostream>
@@ -145,8 +232,8 @@ void matrix_transpose_v1(const T* idata, T* odata, int M, int N) {
 #include <chrono>
 
 void test_matrix_transpose() {
-    const int M = 512;
-    const int N = 512;
+    const int M = 4096;
+    const int N = 4096;
     const size_t size = M * N;
     
     // 分配主机内存
@@ -160,7 +247,7 @@ void test_matrix_transpose() {
     std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
     
     for (size_t i = 0; i < size; ++i) {
-        h_input[i] = __float2bfloat16(dis(gen));
+        h_input[i] = __float2bfloat16(dis(gen) + i);
     }
     
     // 计算参考结果（CPU转置）
@@ -181,20 +268,27 @@ void test_matrix_transpose() {
     cudaMemcpy(d_input, h_input.data(), size * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice);
     
     // 执行GPU转置
-    auto TESTS = 10;
+    size_t TESTS = 10;
 
     auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < TESTS; i++) {
-        matrix_transpose_v1(d_input, d_output, M, N);
+    for (size_t i = 0; i < TESTS; i++) {
+        matrix_transpose_v2(d_input, d_output, M, N);
     }
+    auto err = cudaGetLastError();
     cudaDeviceSynchronize();
     auto end = std::chrono::high_resolution_clock::now();
 
-    auto data_size = size * sizeof(__nv_bfloat16);
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA Error: " << cudaGetErrorString(err) << std::endl;
+        cudaFree(d_input);
+        cudaFree(d_output);
+        return;
+    }
 
+    auto data_size = size * sizeof(__nv_bfloat16);
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start) / TESTS;
     auto duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start) / TESTS;
-    double GB_per_second = (double)data_size / duration_ns.count() * 1000;
+    double GB_per_second = (double)data_size / (double)duration.count() / (double)1e6;
     std::cout << "GPU transpose time: " << duration.count() << " microseconds" << std::endl;
     std::cout << "GPU transpose bandwidth: " << GB_per_second << " GB/s" << std::endl;
 
