@@ -7,3 +7,4 @@ build*/
 
 __pycache__
 log/
+micro-kernels/matrix_transpose/test_transpose
