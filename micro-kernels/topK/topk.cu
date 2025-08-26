@@ -45,10 +45,7 @@ __device__ void allreduce_within_block(const T* input, T* output, size_t size, )
     if (thread_id == 0) {
         *output = shared_data[0];
     }
-
 }
-
-
 /**
  * 
  * 
