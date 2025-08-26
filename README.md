@@ -11,8 +11,9 @@ The basic kernels include:
     - SME
     - AMX
 - GEMM GPU
-    - SGEMM: Finished
-    - HGEMM&FP8 GEMM: TODO
+    - SGEMM: [SGEMM](https://github.com/machinelv/Kernels-Optimization/tree/master/GEMM/gpu/CUDA)
+    - Low Precision GEMM: [QGEMM](https://github.com/machinelv/QGEMM)
+    - Mix Precision GEMM: [HIP Source FP8](https://github.com/machinelv/AMD-Infer-25/tree/master/fp8-mm)
 - MLA
 - MoE
 
@@ -24,7 +25,11 @@ The kernels will be realized by:
 
 ## Realized Kernels
 
-- [x] GEMM CUDA FP16
+- [x] GEMM CUDA BF16
 - [ ] Mix Precision GEMM CUDA FP8
 - [ ] TopK CUDA
-- [ ] Softmax Triton
+- [x] Softmax Triton
+
+
+## Results
+- CUDA GEMM BF16 has achieved 97% performance of cublas
