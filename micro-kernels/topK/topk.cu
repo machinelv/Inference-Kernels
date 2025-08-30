@@ -73,7 +73,6 @@ __device__ void count_radix(const elementT* data, size_t n, size_t slice_stride,
     //reduce in a warp
     for (size_t i = 0; i < radix_size; i++) {
         // counts[i] = ; 
-
     
     }
 
@@ -108,7 +107,7 @@ __global__ void topk_kernel(const T* input, int k, int dim, bool largest, bool s
     
 }
 
-
+#ifdef TORCH_API
 
 void topk(torch::Tensor input, int k, int dim, bool largest, bool sorted, torch::Tensor out) {
     // Launch the kernel
@@ -116,3 +115,5 @@ void topk(torch::Tensor input, int k, int dim, bool largest, bool sorted, torch:
     const int blocks = (input.numel() + threadsPerBlock - 1) / threadsPerBlock;
     topk_kernel<<<blocks, threadsPerBlock>>>(input.data_ptr<float>(), k, dim, largest, sorted, out.data_ptr<float>());
 }
+
+#endif
